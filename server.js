@@ -83,7 +83,6 @@ app.post("/webhook", async (req, res) => {
         amount: lead.value || 0,
         currency: lead.currency || "AED",
       },
-      note: lead.message || "Created via webhook",
     };
 
     console.log("🧾 Creating Lead payload:", leadPayload);
