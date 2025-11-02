@@ -6,60 +6,70 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// Basic check route
-app.get("/", (req, res) => res.send("✅ Property Finder → Pipedrive is live"));
+// ✅ Health check
+app.get("/", (req, res) => {
+  res.send("✅ Pipedrive Lead Webhook is running");
+});
 
-// Main webhook endpoint
+// 🚀 Webhook endpoint to create a lead in Pipedrive
 app.post("/webhook", async (req, res) => {
   try {
     const lead = req.body;
-    console.log("Received lead:", lead);
+    console.log("Received Lead Payload:", lead);
 
+    // --- REQUIRED CONFIG ---
     const PD_TOKEN = process.env.PIPEDRIVE_API_TOKEN;
+    const PD_DOMAIN =
+      process.env.PIPEDRIVE_DOMAIN || "https://api.pipedrive.com/v1";
 
+    // --- Create a Person (optional but recommended) ---
     const personPayload = {
-      name: lead.name || "Property Finder Lead",
+      name: lead.name || "New Lead",
       email: lead.email ? [{ value: lead.email, primary: true }] : [],
       phone: lead.phone ? [{ value: lead.phone, primary: true }] : [],
     };
 
-    // Create person
-    const personRes = await fetch(
-      `https://api.pipedrive.com/v1/persons?api_token=${PD_TOKEN}`,
+    const personResp = await fetch(
+      `${PD_DOMAIN}/persons?api_token=${PD_TOKEN}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(personPayload),
       }
     );
-    const personData = await personRes.json();
+    const personData = await personResp.json();
     const personId = personData.data?.id;
-    if (!personId) throw new Error("Failed to create person");
+    console.log("Person created:", personId);
 
-    // Create deal
-    const dealPayload = {
-      title: `${lead.name || "PF Lead"} - ${lead.listing_id || ""}`,
+    // --- Create the Lead ---
+    const leadPayload = {
+      title: lead.title || `New Lead - ${lead.name || "Unknown"}`,
       person_id: personId,
-      value: lead.budget || 0,
+      value: lead.value || 0,
       currency: lead.currency || "AED",
+      note: lead.message || "Created via webhook",
     };
 
-    const dealRes = await fetch(
-      `https://api.pipedrive.com/v1/deals?api_token=${PD_TOKEN}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(dealPayload),
-      }
-    );
-    const dealData = await dealRes.json();
+    const createLead = await fetch(`${PD_DOMAIN}/leads?api_token=${PD_TOKEN}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(leadPayload),
+    });
 
-    res.json({ success: true, person: personData.data, deal: dealData.data });
+    const leadData = await createLead.json();
+    console.log("Lead created:", leadData.data);
+
+    res.status(200).json({
+      success: true,
+      pipedrive_lead_id: leadData.data?.id,
+      pipedrive_person_id: personId,
+    });
   } catch (err) {
-    console.error(err);
+    console.error("Error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
+// --- Start server ---
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Webhook running on port ${PORT}`));
