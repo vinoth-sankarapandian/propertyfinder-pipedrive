@@ -10,7 +10,7 @@ const PD_TOKEN = process.env.PIPEDRIVE_API_TOKEN;
 const PD_DOMAIN =
   process.env.PIPEDRIVE_DOMAIN || "https://api.pipedrive.com/v1";
 
-// 🔍 Helper: find existing person
+// 🔍 Search person helper
 async function findPerson({ email, phone }) {
   try {
     if (email) {
@@ -49,10 +49,9 @@ app.post("/webhook", async (req, res) => {
     const email = lead.email?.trim();
     const phone = lead.phone?.trim();
 
-    // 1️⃣ Search for person
+    // 1️⃣ Find or create person
     let personId = await findPerson({ email, phone });
 
-    // 2️⃣ If not found → create new person
     if (!personId) {
       const personPayload = {
         name: lead.name || "Webhook Lead",
@@ -68,24 +67,26 @@ app.post("/webhook", async (req, res) => {
         }
       );
       const personResp = await createPerson.json();
-      console.log("👤 Person API response:", personResp);
+      console.log("👤 Person created:", personResp);
       personId = personResp.data?.id;
     } else {
-      console.log("👤 Using existing person ID:", personId);
+      console.log("👤 Existing person found:", personId);
     }
 
     if (!personId) throw new Error("Person not found or created");
 
-    // 3️⃣ Create Lead
+    // 2️⃣ Create Lead (correct format for value)
     const leadPayload = {
       title: lead.title || `New Lead - ${lead.name || "Unknown"}`,
       person_id: personId,
-      value: lead.value || 0,
-      currency: lead.currency || "AED",
+      value: {
+        amount: lead.value || 0,
+        currency: lead.currency || "AED",
+      },
       note: lead.message || "Created via webhook",
     };
 
-    console.log("🧾 Creating Lead with payload:", leadPayload);
+    console.log("🧾 Creating Lead payload:", leadPayload);
 
     const createLead = await fetch(`${PD_DOMAIN}/leads?api_token=${PD_TOKEN}`, {
       method: "POST",
@@ -94,12 +95,10 @@ app.post("/webhook", async (req, res) => {
     });
 
     const leadResp = await createLead.json();
-    console.log("📦 Lead API response:", leadResp);
+    console.log("📦 Lead response:", leadResp);
 
     if (!leadResp.success) {
-      throw new Error(
-        `Pipedrive Lead not created: ${JSON.stringify(leadResp)}`
-      );
+      throw new Error(`Lead creation failed: ${JSON.stringify(leadResp)}`);
     }
 
     res.status(200).json({
