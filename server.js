@@ -6,42 +6,79 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// ✅ Health check
-app.get("/", (req, res) => {
-  res.send("✅ Pipedrive Lead Webhook is running");
-});
+const PD_TOKEN = process.env.PIPEDRIVE_API_TOKEN;
+const PD_DOMAIN =
+  process.env.PIPEDRIVE_DOMAIN || "https://api.pipedrive.com/v1";
 
-// 🚀 Webhook endpoint to create a lead in Pipedrive
+// ✅ Helper function: search person by email or phone
+async function findPerson({ email, phone }) {
+  try {
+    if (email) {
+      const searchEmail = await fetch(
+        `${PD_DOMAIN}/persons/search?term=${encodeURIComponent(
+          email
+        )}&fields=email&exact_match=true&api_token=${PD_TOKEN}`
+      );
+      const emailRes = await searchEmail.json();
+      const item = emailRes.data?.items?.[0]?.item;
+      if (item?.id) return item.id;
+    }
+
+    if (phone) {
+      const searchPhone = await fetch(
+        `${PD_DOMAIN}/persons/search?term=${encodeURIComponent(
+          phone
+        )}&fields=phone&api_token=${PD_TOKEN}`
+      );
+      const phoneRes = await searchPhone.json();
+      const item = phoneRes.data?.items?.[0]?.item;
+      if (item?.id) return item.id;
+    }
+  } catch (err) {
+    console.error("Error finding person:", err);
+  }
+  return null;
+}
+
+// ✅ Health check
+app.get("/", (req, res) => res.send("✅ Pipedrive Lead Webhook is running"));
+
+// 🚀 Main webhook endpoint
 app.post("/webhook", async (req, res) => {
   try {
     const lead = req.body;
-    console.log("Received Lead Payload:", lead);
+    console.log("Received lead payload:", lead);
 
-    // --- REQUIRED CONFIG ---
-    const PD_TOKEN = process.env.PIPEDRIVE_API_TOKEN;
-    const PD_DOMAIN =
-      process.env.PIPEDRIVE_DOMAIN || "https://api.pipedrive.com/v1";
+    const email = lead.email?.trim();
+    const phone = lead.phone?.trim();
 
-    // --- Create a Person (optional but recommended) ---
-    const personPayload = {
-      name: lead.name || "New Lead",
-      email: lead.email ? [{ value: lead.email, primary: true }] : [],
-      phone: lead.phone ? [{ value: lead.phone, primary: true }] : [],
-    };
+    // 1️⃣ Check if person already exists
+    let personId = await findPerson({ email, phone });
 
-    const personResp = await fetch(
-      `${PD_DOMAIN}/persons?api_token=${PD_TOKEN}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(personPayload),
-      }
-    );
-    const personData = await personResp.json();
-    const personId = personData.data?.id;
-    console.log("Person created:", personId);
+    // 2️⃣ If not found, create a new person
+    if (!personId) {
+      const personPayload = {
+        name: lead.name || "New Lead",
+        email: email ? [{ value: email, primary: true }] : [],
+        phone: phone ? [{ value: phone, primary: true }] : [],
+      };
 
-    // --- Create the Lead ---
+      const createPerson = await fetch(
+        `${PD_DOMAIN}/persons?api_token=${PD_TOKEN}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(personPayload),
+        }
+      );
+      const personResp = await createPerson.json();
+      personId = personResp.data?.id;
+      console.log("New person created:", personId);
+    } else {
+      console.log("Existing person found:", personId);
+    }
+
+    // 3️⃣ Create Lead linked to that person
     const leadPayload = {
       title: lead.title || `New Lead - ${lead.name || "Unknown"}`,
       person_id: personId,
@@ -55,14 +92,14 @@ app.post("/webhook", async (req, res) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(leadPayload),
     });
-
     const leadData = await createLead.json();
-    console.log("Lead created:", leadData.data);
+
+    console.log("Lead created:", leadData.data?.id);
 
     res.status(200).json({
       success: true,
-      pipedrive_lead_id: leadData.data?.id,
       pipedrive_person_id: personId,
+      pipedrive_lead_id: leadData.data?.id,
     });
   } catch (err) {
     console.error("Error:", err);
