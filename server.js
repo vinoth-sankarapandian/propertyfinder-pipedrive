@@ -9,7 +9,7 @@ app.use(express.json());
 const PD_TOKEN = process.env.PIPEDRIVE_API_TOKEN;
 const PD_DOMAIN =
   process.env.PIPEDRIVE_DOMAIN || "https://api.pipedrive.com/v1";
-const CLIENTS_PIPELINE_ID = 5;
+const CLIENTS_PIPELINE_ID = 4;
 
 // 🔍 Helper: search existing person by email or phone
 async function findPerson({ email, phone }) {
