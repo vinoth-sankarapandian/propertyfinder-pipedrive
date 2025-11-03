@@ -9,6 +9,7 @@ app.use(express.json());
 const PD_TOKEN = process.env.PIPEDRIVE_API_TOKEN;
 const PD_DOMAIN =
   process.env.PIPEDRIVE_DOMAIN || "https://api.pipedrive.com/v1";
+const CLIENTS_PIPELINE_ID = 5;
 
 // 🔍 Helper: search existing person by email or phone
 async function findPerson({ email, phone }) {
@@ -92,7 +93,7 @@ app.post("/webhook", async (req, res) => {
       status: "open",
       visible_to: "3", // 3 = owner & followers
       // Add optional fields if needed:
-      // "pipeline_id": 1,
+      pipeline_id: CLIENTS_PIPELINE_ID,
       // "stage_id": 2,
       // "custom_field_key": "value"
     };
