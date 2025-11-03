@@ -10,28 +10,31 @@ const PD_TOKEN = process.env.PIPEDRIVE_API_TOKEN;
 const PD_DOMAIN =
   process.env.PIPEDRIVE_DOMAIN || "https://api.pipedrive.com/v1";
 
-// 🔍 Search person helper
+// 🔍 Helper: search existing person by email or phone
 async function findPerson({ email, phone }) {
   try {
+    // Search by email first
     if (email) {
-      const r = await fetch(
+      const emailSearch = await fetch(
         `${PD_DOMAIN}/persons/search?term=${encodeURIComponent(
           email
         )}&fields=email&exact_match=true&api_token=${PD_TOKEN}`
       );
-      const j = await r.json();
-      const item = j.data?.items?.[0]?.item;
-      if (item?.id) return item.id;
+      const emailRes = await emailSearch.json();
+      const found = emailRes.data?.items?.[0]?.item;
+      if (found?.id) return found.id;
     }
+
+    // Search by phone next
     if (phone) {
-      const r = await fetch(
+      const phoneSearch = await fetch(
         `${PD_DOMAIN}/persons/search?term=${encodeURIComponent(
           phone
-        )}&fields=phone&api_token=${PD_TOKEN}`
+        )}&fields=phone&exact_match=true&api_token=${PD_TOKEN}`
       );
-      const j = await r.json();
-      const item = j.data?.items?.[0]?.item;
-      if (item?.id) return item.id;
+      const phoneRes = await phoneSearch.json();
+      const found = phoneRes.data?.items?.[0]?.item;
+      if (found?.id) return found.id;
     }
   } catch (err) {
     console.error("❌ Error searching person:", err);
@@ -39,25 +42,29 @@ async function findPerson({ email, phone }) {
   return null;
 }
 
-app.get("/", (_, res) => res.send("✅ Pipedrive Lead Webhook is running"));
+// 🧠 Health check
+app.get("/", (_, res) => res.send("✅ Pipedrive Deal Webhook is live"));
 
+// 🚀 Main webhook endpoint
 app.post("/webhook", async (req, res) => {
   try {
     const lead = req.body;
-    console.log("📩 Incoming lead:", lead);
+    console.log("📩 Incoming data:", lead);
 
     const email = lead.email?.trim();
     const phone = lead.phone?.trim();
 
-    // 1️⃣ Find or create person
+    // 1️⃣ Find person by email or phone
     let personId = await findPerson({ email, phone });
 
+    // 2️⃣ If not found, create new person
     if (!personId) {
       const personPayload = {
         name: lead.name || "Webhook Lead",
         email: email ? [{ value: email, primary: true }] : [],
         phone: phone ? [{ value: phone, primary: true }] : [],
       };
+
       const createPerson = await fetch(
         `${PD_DOMAIN}/persons?api_token=${PD_TOKEN}`,
         {
@@ -66,44 +73,49 @@ app.post("/webhook", async (req, res) => {
           body: JSON.stringify(personPayload),
         }
       );
+
       const personResp = await createPerson.json();
-      console.log("👤 Person created:", personResp);
+      console.log("👤 Person create response:", personResp);
       personId = personResp.data?.id;
     } else {
       console.log("👤 Existing person found:", personId);
     }
 
-    if (!personId) throw new Error("Person not found or created");
+    if (!personId) throw new Error("Person could not be found or created");
 
-    // 2️⃣ Create Lead (correct format for value)
-    const leadPayload = {
-      title: lead.title || `New Lead - ${lead.name || "Unknown"}`,
+    // 3️⃣ Create Deal linked to that person
+    const dealPayload = {
+      title: lead.title || `New Deal - ${lead.name || "Unknown"}`,
       person_id: personId,
-      value: {
-        amount: lead.value || 0,
-        currency: lead.currency || "AED",
-      },
+      value: lead.value || 0,
+      currency: lead.currency || "AED",
+      status: "open",
+      visible_to: "3", // 3 = owner & followers
+      // Add optional fields if needed:
+      // "pipeline_id": 1,
+      // "stage_id": 2,
+      // "custom_field_key": "value"
     };
 
-    console.log("🧾 Creating Lead payload:", leadPayload);
+    console.log("🧾 Creating Deal with payload:", dealPayload);
 
-    const createLead = await fetch(`${PD_DOMAIN}/leads?api_token=${PD_TOKEN}`, {
+    const createDeal = await fetch(`${PD_DOMAIN}/deals?api_token=${PD_TOKEN}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(leadPayload),
+      body: JSON.stringify(dealPayload),
     });
 
-    const leadResp = await createLead.json();
-    console.log("📦 Lead response:", leadResp);
+    const dealResp = await createDeal.json();
+    console.log("📦 Deal response:", dealResp);
 
-    if (!leadResp.success) {
-      throw new Error(`Lead creation failed: ${JSON.stringify(leadResp)}`);
+    if (!dealResp.success) {
+      throw new Error(`Deal not created: ${JSON.stringify(dealResp)}`);
     }
 
     res.status(200).json({
       success: true,
       pipedrive_person_id: personId,
-      pipedrive_lead_id: leadResp.data?.id,
+      pipedrive_deal_id: dealResp.data?.id,
     });
   } catch (err) {
     console.error("❌ Error:", err);
@@ -111,5 +123,6 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+// 🚀 Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Webhook running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
