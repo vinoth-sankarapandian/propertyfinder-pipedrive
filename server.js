@@ -7,29 +7,22 @@ dotenv.config();
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-/* -------------------- CONFIG -------------------- */
+/* -------------------- CONSTANTS -------------------- */
+
+// 🔧 Hard-coded Zoho log URL (for function "testlog")
+const ZCRM_LOG_URL =
+  "https://www.zohoapis.in/crm/v7/functions/testlog/actions/execute?auth_type=apikey&zapikey=1003.9ade13a0c8a317b0b830c1889c073d56.3f578e1bb942b520e28b4d1a49fa36ca";
+
+// ---- Environment Config ----
 const PD_TOKEN = process.env.PIPEDRIVE_API_TOKEN;
 const PD_DOMAIN =
-  process.env.PIPEDRIVE_DOMAIN || "https://api.pipedrive.com/v1";
+  process.env.PIPEDRIVE_DOMAIN || "https://api.pipedrive.com/api/v1";
 const CLIENTS_PIPELINE_ID = Number(process.env.CLIENTS_PIPELINE_ID || 4);
 const DEFAULT_CURRENCY = process.env.DEFAULT_CURRENCY || "AED";
-
 const PF_API_KEY = process.env.PF_API_KEY;
 const PF_API_SECRET = process.env.PF_API_SECRET;
-
-const PF_SECRET_KEY = process.env.PF_SECRET_KEY || ""; // optional webhook auth
+const PF_SECRET_KEY = process.env.PF_SECRET_KEY || "";
 const ATLAS_BASE = "https://atlas.propertyfinder.com/v1";
-
-/* ---- guard invalid Pipedrive domain (common mistake) ---- */
-// if (
-//   !/^https:\/\/(api\.pipedrive\.com|[a-z0-9-]+\.pipedrive\.com)\/api\/v1$/i.test(
-//     PD_DOMAIN
-//   )
-// ) {
-//   throw new Error(
-//     `Invalid PIPEDRIVE_DOMAIN: ${PD_DOMAIN}. Use https://api.pipedrive.com/v1 or https://<company>.pipedrive.com/api/v1`
-//   );
-// }
 
 /* -------------------- ATLAS TOKEN CACHE -------------------- */
 let atlasToken = null;
@@ -38,67 +31,102 @@ let atlasTokenExpiry = 0;
 async function getAtlasToken() {
   const now = Date.now();
   if (atlasToken && now < atlasTokenExpiry) return atlasToken;
-
+  await sendLog("🔐 Generating new Atlas token...");
   const res = await fetch(`${ATLAS_BASE}/auth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ apiKey: PF_API_KEY, apiSecret: PF_API_SECRET }),
   });
-
   const data = await res.json();
-  if (!data?.accessToken) {
+  if (!data?.accessToken)
     throw new Error(`Atlas token error: ${JSON.stringify(data)}`);
-  }
-
   atlasToken = data.accessToken;
-  // refresh 1 minute early
-  atlasTokenExpiry = now + Number(data.expiresIn || 3600) * 1000 - 60_000;
+  atlasTokenExpiry = now + Number(data.expiresIn || 3600) * 1000 - 60000;
+  await sendLog("✅ Atlas token refreshed");
   return atlasToken;
 }
 
-async function atlasGet(endpointWithQuery) {
+async function atlasGet(path) {
   const token = await getAtlasToken();
-  const r = await fetch(`${ATLAS_BASE}${endpointWithQuery}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
+  const url = `${ATLAS_BASE}${path}`;
+  const r = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
   });
-  if (!r.ok) {
-    const text = await r.text();
-    throw new Error(
-      `Atlas GET ${endpointWithQuery} failed: ${r.status} ${text}`
-    );
+  const text = await r.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {}
+  await sendLog(`📡 Atlas GET ${url}`, { status: r.status, json });
+  return { ok: r.ok, status: r.status, json, text };
+}
+
+/* -------------------- UTILITIES -------------------- */
+function normalizePhone(str) {
+  return str ? str.toString().replace(/[^\d+]/g, "") : null;
+}
+function buildDealTitle({ name, listingRef, listingTitle, channel }) {
+  const who = name || "PF Lead";
+  const ref = listingRef ? ` | ${listingRef}` : "";
+  const ttl = listingTitle ? ` | ${listingTitle}` : "";
+  const ch = channel ? ` (${channel})` : "";
+  return `${who}${ttl}${ref}${ch}`;
+}
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/* -------------------- LOGGING TO ZOHO -------------------- */
+async function sendLog(message, data = {}) {
+  const payload = {
+    time: dayjs().format("YYYY-MM-DD HH:mm:ss"),
+    message,
+    data,
+  };
+  console.log("📝", message, data || "");
+  try {
+    await fetch(ZCRM_LOG_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    console.error("⚠️ Zoho log send failed:", e.message);
   }
-  return r.json();
 }
 
 /* -------------------- PIPEDRIVE HELPERS -------------------- */
 async function pdGet(path) {
-  const r = await fetch(
-    `${PD_DOMAIN}${path}${path.includes("?") ? "&" : "?"}api_token=${PD_TOKEN}`
-  );
-  return r.json();
+  const url = `${PD_DOMAIN}${path}${
+    path.includes("?") ? "&" : "?"
+  }api_token=${PD_TOKEN}`;
+  const r = await fetch(url);
+  const j = await r.json();
+  await sendLog(`📥 Pipedrive GET ${path}`, j);
+  return j;
 }
-
 async function pdPost(path, body) {
-  const r = await fetch(`${PD_DOMAIN}${path}?api_token=${PD_TOKEN}`, {
+  const url = `${PD_DOMAIN}${path}?api_token=${PD_TOKEN}`;
+  const r = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  return r.json();
+  const j = await r.json();
+  await sendLog(`📤 Pipedrive POST ${path}`, { body, resp: j });
+  return j;
 }
-
 async function pdPut(path, body) {
-  const r = await fetch(`${PD_DOMAIN}${path}?api_token=${PD_TOKEN}`, {
+  const url = `${PD_DOMAIN}${path}?api_token=${PD_TOKEN}`;
+  const r = await fetch(url, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  return r.json();
+  const j = await r.json();
+  await sendLog(`🧩 Pipedrive PUT ${path}`, { body, resp: j });
+  return j;
 }
-
 async function findPerson({ email, phone }) {
   if (email) {
     const j = await pdGet(
@@ -121,126 +149,69 @@ async function findPerson({ email, phone }) {
   return null;
 }
 
-/* -------------------- UTILS -------------------- */
-function normalizePhone(str) {
-  return str ? str.toString().replace(/[^\d+]/g, "") : null;
-}
-
-function buildDealTitle({ name, listingRef, listingTitle, channel }) {
-  const who = name || "PF Lead";
-  const ref = listingRef ? ` | ${listingRef}` : "";
-  const ttl = listingTitle ? ` | ${listingTitle}` : "";
-  const ch = channel ? ` (${channel})` : "";
-  return `${who}${ttl}${ref}${ch}`;
-}
-
-function buildNote({ lead, user, listing }) {
-  const lines = [];
-  lines.push(`**Portal:** Property Finder`);
-  if (lead?.channel) lines.push(`**Channel:** ${lead.channel}`);
-  if (lead?.status) lines.push(`**Lead Status:** ${lead.status}`);
-  if (lead?.createdAt) lines.push(`**Lead Created At:** ${lead.createdAt}`);
-  if (lead?.responseLink) lines.push(`**Response Link:** ${lead.responseLink}`);
-
-  if (user) {
-    const fullName =
-      [user.firstName, user.lastName].filter(Boolean).join(" ").trim() ||
-      user?.publicProfile?.name;
-    if (fullName) lines.push(`**User Name:** ${fullName}`);
-    if (user.email || user?.publicProfile?.email)
-      lines.push(`**User Email:** ${user.email || user.publicProfile.email}`);
-    const phone =
-      user.mobile ||
-      user?.publicProfile?.whatsappPhone ||
-      user?.publicProfile?.phone;
-    if (phone) lines.push(`**User Phone:** ${phone}`);
-    if (user?.publicProfile?.linkedinAddress)
-      lines.push(`**LinkedIn:** ${user.publicProfile.linkedinAddress}`);
-    if (
-      Array.isArray(user?.publicProfile?.compliances) &&
-      user.publicProfile.compliances.length
-    ) {
-      const brn = user.publicProfile.compliances.find(
-        (c) => c.type === "brn"
-      )?.value;
-      if (brn) lines.push(`**BRN:** ${brn}`);
-    }
-  }
-
-  if (listing) {
-    if (listing.reference) lines.push(`**Listing Ref:** ${listing.reference}`);
-    if (listing.title?.en) lines.push(`**Listing Title:** ${listing.title.en}`);
-    const amount = listing?.price?.amounts?.yearly;
-    if (amount) lines.push(`**Price (yearly):** ${amount} AED`);
-    if (listing.uaeEmirate) lines.push(`**Emirate:** ${listing.uaeEmirate}`);
-    if (listing.type) lines.push(`**Type:** ${listing.type}`);
-    if (listing.bedrooms) lines.push(`**Bedrooms:** ${listing.bedrooms}`);
-    if (listing.bathrooms) lines.push(`**Bathrooms:** ${listing.bathrooms}`);
-    if (listing.furnishingType)
-      lines.push(`**Furnishing:** ${listing.furnishingType}`);
-    if (listing.availableFrom)
-      lines.push(`**Available From:** ${listing.availableFrom}`);
-  }
-
-  lines.push("");
-  lines.push("**Raw Lead JSON:**");
-  lines.push("```json");
-  lines.push(JSON.stringify(lead, null, 2));
-  lines.push("```");
-  return lines.join("\n");
-}
-
-/* -------------------- ROUTES -------------------- */
-app.get("/", (_, res) =>
-  res.send("✅ PF Atlas → Pipedrive webhook is running")
-);
-
+/* -------------------- MAIN HANDLER -------------------- */
 app.post("/webhook", async (req, res) => {
   try {
-    // Optional shared-secret check
-    if (PF_SECRET_KEY) {
-      const key = req.headers["x-api-key"];
-      if (!key || key !== PF_SECRET_KEY)
-        return res.status(401).json({ success: false, error: "Unauthorized" });
-    }
+    await sendLog("📩 Incoming event", req.body);
 
     const evt = req.body;
     if (evt?.type !== "lead.created") {
-      return res.status(200).json({
-        success: true,
-        ignored: true,
-        reason: "Not a lead.created event",
-      });
+      await sendLog("ℹ️ Ignored non-lead event", evt.type);
+      return res.status(200).json({ success: true, ignored: true });
     }
 
-    // 1) Pull full lead from Atlas (/leads?id=...)
     const leadId = evt?.entity?.id;
     if (!leadId) throw new Error("Missing lead id");
-    const leadResp = await atlasGet(`/leads?id=${encodeURIComponent(leadId)}`);
-    const lead = leadResp?.data?.[0];
-    if (!lead) throw new Error("Lead not found on Atlas");
 
-    const channel = lead.channel || null;
-    const publicProfileId = lead.publicProfile?.id || null;
-    const listingId = lead.listing?.id || null;
-
-    // 2) Person comes from USERS API (source of truth)
-    let user = null;
-    if (publicProfileId) {
-      const userResp = await atlasGet(
-        `/users?publicProfileId=${encodeURIComponent(publicProfileId)}`
+    // --- Retry fetch ---
+    let lead = null;
+    for (let i = 0; i < 5; i++) {
+      const r = await atlasGet(`/leads?id=${encodeURIComponent(leadId)}`);
+      const data = r?.json?.data;
+      if (Array.isArray(data) && data.length > 0) {
+        lead = data[0];
+        break;
+      }
+      await sendLog(`⚠️ Lead not ready (try ${i + 1}/5)`);
+      await sleep(500 + i * 500);
+    }
+    if (!lead) {
+      await sendLog(
+        "⚠️ Lead not found after retries, using event.payload fallback"
       );
-      user = userResp?.data?.[0] || null;
+      lead = evt.payload || {};
     }
 
-    // Extract person fields from USERS (fallback to lead if missing)
-    const fullNameFromUser =
+    const listingId = lead?.listing?.id;
+    const publicProfileId = lead?.publicProfile?.id;
+    let user = null,
+      listing = null;
+
+    // Fetch user
+    if (publicProfileId) {
+      const userRes = await atlasGet(
+        `/users?publicProfileId=${encodeURIComponent(publicProfileId)}`
+      );
+      user = userRes?.json?.data?.[0] || null;
+    }
+
+    // Fetch listing
+    if (listingId) {
+      const listRes = await atlasGet(
+        `/listings?filter[ids]=${encodeURIComponent(listingId)}`
+      );
+      listing = listRes?.json?.results?.[0] || null;
+    }
+
+    // Extract person fields
+    const fullName =
       [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim() ||
       user?.publicProfile?.name ||
       lead?.sender?.name ||
       "Property Finder Lead";
-    const emailFromUser = user?.email || user?.publicProfile?.email || null;
-    const phoneFromUser = normalizePhone(
+
+    const email = user?.email || user?.publicProfile?.email || null;
+    const phone = normalizePhone(
       user?.mobile ||
         user?.publicProfile?.whatsappPhone ||
         user?.publicProfile?.phone ||
@@ -249,104 +220,86 @@ app.post("/webhook", async (req, res) => {
         )?.value
     );
 
-    // 3) Listing details
-    let listing = null;
-    if (listingId) {
-      const listingResp = await atlasGet(
-        `/listings?filter[ids]=${encodeURIComponent(listingId)}`
-      );
-      listing = listingResp?.results?.[0] || null;
-    }
+    await sendLog("👤 Person details extracted", { fullName, email, phone });
 
-    // 4) Find or create (or update) Person in Pipedrive
-    let personId = await findPerson({
-      email: emailFromUser,
-      phone: phoneFromUser,
-    });
+    // Create/update person
+    let personId = await findPerson({ email, phone });
     if (!personId) {
-      const personPayload = {
-        name: fullNameFromUser,
-        ...(emailFromUser
-          ? { email: [{ value: emailFromUser, primary: true }] }
-          : {}),
-        ...(phoneFromUser
-          ? { phone: [{ value: phoneFromUser, primary: true }] }
-          : {}),
-        // Optional: map extra to custom fields (replace keys accordingly):
-        // "person_linkedin_cf": user?.publicProfile?.linkedinAddress,
-        // "person_brn_cf":      (user?.publicProfile?.compliances || []).find(c => c.type === "brn")?.value,
-        // "person_role_cf":     user?.role?.name
-      };
-      const p = await pdPost("/persons", personPayload);
-      if (!p?.success)
-        throw new Error(`Create person failed: ${JSON.stringify(p)}`);
+      const p = await pdPost("/persons", {
+        name: fullName,
+        ...(email ? { email: [{ value: email, primary: true }] } : {}),
+        ...(phone ? { phone: [{ value: phone, primary: true }] } : {}),
+      });
+      if (!p.success) throw new Error("Person create failed");
       personId = p.data.id;
     } else {
-      // Optional: keep person updated with fresher PF data
-      const updatePayload = {
-        name: fullNameFromUser,
-        ...(emailFromUser
-          ? { email: [{ value: emailFromUser, primary: true }] }
-          : {}),
-        ...(phoneFromUser
-          ? { phone: [{ value: phoneFromUser, primary: true }] }
-          : {}),
-      };
-      await pdPut(`/persons/${personId}`, updatePayload);
+      await pdPut(`/persons/${personId}`, {
+        name: fullName,
+        ...(email ? { email: [{ value: email, primary: true }] } : {}),
+        ...(phone ? { phone: [{ value: phone, primary: true }] } : {}),
+      });
     }
 
-    // 5) Create Deal in Clients pipeline
+    // Create deal
     const dealTitle = buildDealTitle({
-      name: fullNameFromUser,
+      name: fullName,
       listingRef: listing?.reference,
       listingTitle: listing?.title?.en,
-      channel,
+      channel: lead?.channel,
     });
-    const dealAmount = Number(listing?.price?.amounts?.yearly || 0);
+    const amount = Number(listing?.price?.amounts?.yearly || 0);
 
-    const dealPayload = {
+    const deal = await pdPost("/deals", {
       title: dealTitle,
       person_id: personId,
-      value: dealAmount,
+      value: amount,
       currency: DEFAULT_CURRENCY,
       pipeline_id: CLIENTS_PIPELINE_ID,
       status: "open",
       visible_to: "3",
-      // Optional:
-      // stage_id: <your stage id in Clients pipeline>,
-      // "deal_listing_reference_cf": listing?.reference,
-      // "deal_listing_id_cf": listingId,
-      // "deal_channel_cf": channel
-    };
-
-    const d = await pdPost("/deals", dealPayload);
-    if (!d?.success)
-      throw new Error(`Create deal failed: ${JSON.stringify(d)}`);
-    const dealId = d.data.id;
-
-    // 6) Add Note with PF context + raw JSON
-    const noteContent = buildNote({ lead, user, listing });
-    const noteResp = await pdPost("/notes", {
-      deal_id: dealId,
-      content: noteContent,
     });
-    if (!noteResp?.success) {
-      console.warn("Note creation failed:", noteResp);
-    }
+    if (!deal.success) throw new Error("Deal creation failed");
 
-    return res.status(200).json({
+    // Add note
+    const note = {
+      deal_id: deal.data.id,
+      content: [
+        `**Portal:** Property Finder`,
+        `**Channel:** ${lead?.channel}`,
+        `**Listing Ref:** ${listing?.reference}`,
+        `**Price:** ${listing?.price?.amounts?.yearly || 0} AED`,
+        `**Response Link:** ${lead?.responseLink}`,
+        "",
+        "**Raw JSON:**",
+        "```json",
+        JSON.stringify(lead, null, 2),
+        "```",
+      ].join("\n"),
+    };
+    await pdPost("/notes", note);
+
+    await sendLog("✅ Deal created successfully", {
+      pipedrive_person_id: personId,
+      pipedrive_deal_id: deal.data.id,
+    });
+
+    res.status(200).json({
       success: true,
       pipedrive_person_id: personId,
-      pipedrive_deal_id: dealId,
+      pipedrive_deal_id: deal.data.id,
     });
   } catch (err) {
     console.error("❌ Error:", err);
+    await sendLog("❌ Error in webhook", {
+      error: err.message,
+      stack: err.stack,
+    });
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
 /* -------------------- START -------------------- */
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
   console.log(`🚀 PF Atlas → Pipedrive webhook running on ${PORT}`)
 );
