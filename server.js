@@ -17,12 +17,23 @@ const ZCRM_LOG_URL =
 const PD_TOKEN = process.env.PIPEDRIVE_API_TOKEN;
 const PD_DOMAIN =
   process.env.PIPEDRIVE_DOMAIN || "https://api.pipedrive.com/api/v1";
-const CLIENTS_PIPELINE_ID = Number(process.env.CLIENTS_PIPELINE_ID || 4);
 const DEFAULT_CURRENCY = process.env.DEFAULT_CURRENCY || "AED";
 const PF_API_KEY = process.env.PF_API_KEY;
 const PF_API_SECRET = process.env.PF_API_SECRET;
-const PF_SECRET_KEY = process.env.PF_SECRET_KEY || "";
 const ATLAS_BASE = "https://atlas.propertyfinder.com/v1";
+
+// Force Clients pipeline = 4
+const CLIENTS_PIPELINE_ID = 4;
+
+/* ---------- PIPEDRIVE CUSTOM FIELDS (DEAL) ---------- */
+const CF_SOURCE_TYPE = "dd33ab8a28f1855b734beab08987eb86933706fa"; // Channel
+const CF_LISTING_REF = "e0c51e09b74263ff900e7d7a1ca4b00d06e58bcf"; // Listing Ref
+const CF_LISTING_PRICE = "cd786e99a8fc60d9d437d9540b5e49f1937ab8ea"; // Listing Price
+const CF_RESPONSE_URL = "167d14dc0b5099bed92a67e682d7ddcbc14fd878"; // Response URL
+const CF_ENQUIRY_DATE = "12dbd54260ad300537c002bd423cf48ecc618e8e"; // Enquiry Date
+const CF_WHATSAPP_NUMBER = "8db7b87dc9d9147db03b063ee9e678d236879791"; // WhatsApp Number
+const CF_LISTING_AGENT = "2fec03e9ce0f41f43c929cbbb1c628e9ec3db3bc"; // Listing Agent
+const CF_AGENT_PHONE = "213b8e2bdbc862b02296cc0233af26689beb4e0a"; // Agent Phone
 
 /* -------------------- ATLAS TOKEN CACHE -------------------- */
 let atlasToken = null;
@@ -72,9 +83,6 @@ function buildDealTitle({ name, listingRef, listingTitle, channel }) {
   const ch = channel ? ` (${channel})` : "";
   return `${who}${ttl}${ref}${ch}`;
 }
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 /* -------------------- LOGGING TO ZOHO -------------------- */
 async function sendLog(message, data = {}) {
@@ -101,9 +109,7 @@ async function pdGet(path) {
     path.includes("?") ? "&" : "?"
   }api_token=${PD_TOKEN}`;
   const r = await fetch(url);
-  const j = await r.json();
-  await sendLog(`📥 Pipedrive GET ${path}`, j);
-  return j;
+  return r.json();
 }
 async function pdPost(path, body) {
   const url = `${PD_DOMAIN}${path}?api_token=${PD_TOKEN}`;
@@ -152,42 +158,30 @@ async function findPerson({ email, phone }) {
 /* -------------------- MAIN HANDLER -------------------- */
 app.post("/webhook", async (req, res) => {
   try {
-    await sendLog("📩 Incoming event", req.body);
+    await sendLog("📩 Incoming webhook", req.body);
 
     const evt = req.body;
-    if (evt?.type !== "lead.created") {
-      await sendLog("ℹ️ Ignored non-lead event", evt.type);
-      return res.status(200).json({ success: true, ignored: true });
-    }
+    if (!evt?.payload) throw new Error("Missing payload in event");
+    const lead = evt.payload;
 
-    const leadId = evt?.entity?.id;
-    if (!leadId) throw new Error("Missing lead id");
+    // Extract sender (customer)
+    const senderName = lead?.sender?.name || "Property Finder Lead";
+    const senderPhone = normalizePhone(
+      (lead?.sender?.contacts || []).find(
+        (c) => (c.type || "").toLowerCase() === "phone"
+      )?.value
+    );
+    const senderEmail =
+      (lead?.sender?.contacts || []).find(
+        (c) => (c.type || "").toLowerCase() === "email"
+      )?.value || null;
 
-    // --- Retry fetch ---
-    let lead = null;
-    for (let i = 0; i < 5; i++) {
-      const r = await atlasGet(`/leads?id=${encodeURIComponent(leadId)}`);
-      const data = r?.json?.data;
-      if (Array.isArray(data) && data.length > 0) {
-        lead = data[0];
-        break;
-      }
-      await sendLog(`⚠️ Lead not ready (try ${i + 1}/5)`);
-      await sleep(500 + i * 500);
-    }
-    if (!lead) {
-      await sendLog(
-        "⚠️ Lead not found after retries, using event.payload fallback"
-      );
-      lead = evt.payload || {};
-    }
-
+    // Extract listing and agent IDs
     const listingId = lead?.listing?.id;
     const publicProfileId = lead?.publicProfile?.id;
-    let user = null,
-      listing = null;
 
-    // Fetch user
+    // Fetch agent details from /users
+    let user = null;
     if (publicProfileId) {
       const userRes = await atlasGet(
         `/users?publicProfileId=${encodeURIComponent(publicProfileId)}`
@@ -195,7 +189,8 @@ app.post("/webhook", async (req, res) => {
       user = userRes?.json?.data?.[0] || null;
     }
 
-    // Fetch listing
+    // Fetch listing details (for title, price, etc.)
+    let listing = null;
     if (listingId) {
       const listRes = await atlasGet(
         `/listings?filter[ids]=${encodeURIComponent(listingId)}`
@@ -203,71 +198,113 @@ app.post("/webhook", async (req, res) => {
       listing = listRes?.json?.results?.[0] || null;
     }
 
-    // Extract person fields
-    const fullName =
+    const listingRef = listing?.reference || lead?.listing?.reference || "";
+    const listingTitle = listing?.title?.en || "";
+    const listingPrice = Number(listing?.price?.amounts?.yearly || 0);
+    const channel = lead?.channel || "";
+
+    const agentName =
       [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim() ||
       user?.publicProfile?.name ||
-      lead?.sender?.name ||
-      "Property Finder Lead";
-
-    const email = user?.email || user?.publicProfile?.email || null;
-    const phone = normalizePhone(
+      "";
+    const agentPhone = normalizePhone(
       user?.mobile ||
         user?.publicProfile?.whatsappPhone ||
         user?.publicProfile?.phone ||
-        (lead?.sender?.contacts || []).find(
-          (c) => (c.type || "").toLowerCase() === "phone"
-        )?.value
+        null
     );
 
-    await sendLog("👤 Person details extracted", { fullName, email, phone });
+    await sendLog("🧾 Extracted lead info", {
+      senderName,
+      senderPhone,
+      channel,
+      listingRef,
+      listingPrice,
+      agentName,
+      agentPhone,
+    });
 
-    // Create/update person
-    let personId = await findPerson({ email, phone });
+    // Create/update Person
+    let personId = await findPerson({ email: senderEmail, phone: senderPhone });
     if (!personId) {
       const p = await pdPost("/persons", {
-        name: fullName,
-        ...(email ? { email: [{ value: email, primary: true }] } : {}),
-        ...(phone ? { phone: [{ value: phone, primary: true }] } : {}),
+        name: senderName,
+        ...(senderEmail
+          ? { email: [{ value: senderEmail, primary: true }] }
+          : {}),
+        ...(senderPhone
+          ? { phone: [{ value: senderPhone, primary: true }] }
+          : {}),
       });
       if (!p.success) throw new Error("Person create failed");
       personId = p.data.id;
     } else {
       await pdPut(`/persons/${personId}`, {
-        name: fullName,
-        ...(email ? { email: [{ value: email, primary: true }] } : {}),
-        ...(phone ? { phone: [{ value: phone, primary: true }] } : {}),
+        name: senderName,
+        ...(senderEmail
+          ? { email: [{ value: senderEmail, primary: true }] }
+          : {}),
+        ...(senderPhone
+          ? { phone: [{ value: senderPhone, primary: true }] }
+          : {}),
       });
     }
 
-    // Create deal
-    const dealTitle = buildDealTitle({
-      name: fullName,
-      listingRef: listing?.reference,
-      listingTitle: listing?.title?.en,
-      channel: lead?.channel,
-    });
-    const amount = Number(listing?.price?.amounts?.yearly || 0);
-
-    const deal = await pdPost("/deals", {
-      title: dealTitle,
+    // Create Deal in Clients pipeline (4) with mapped fields
+    const dealPayload = {
+      title: buildDealTitle({
+        name: senderName,
+        listingRef,
+        listingTitle,
+        channel,
+      }),
       person_id: personId,
-      value: amount,
+      value: listingPrice,
       currency: DEFAULT_CURRENCY,
       pipeline_id: CLIENTS_PIPELINE_ID,
       status: "open",
       visible_to: "3",
-    });
+
+      // === Primary PF → Pipedrive field mappings ===
+      [CF_SOURCE_TYPE]: channel || null, // Source Type
+      [CF_LISTING_REF]: listing?.reference || null, // Listing Ref
+      [CF_LISTING_PRICE]: listingPrice || 0, // Listing Price
+      [CF_RESPONSE_URL]: lead?.responseLink || null, // Response URL
+      [CF_ENQUIRY_DATE]: lead?.createdAt || null, // Enquiry Date
+      [CF_WHATSAPP_NUMBER]: senderPhone || null, // WhatsApp Number
+      [CF_LISTING_AGENT]: agentName || null, // Listing Agent
+      [CF_AGENT_PHONE]: agentPhone || null, // Agent Phone
+
+      // === Additional Property / Agent info ===
+      "146ce25cf22cf5635f7cabde8c81214ff2202c2c":
+        user?.email || user?.publicProfile?.email || null, // Agent Email
+      cb6454716c95c7f906666d170b46483631a770b0:
+        user?.id || user?.publicProfile?.id || null, // Agent Portal ID
+      "50332e118438da736f8b85d589d24448da38bd5e": listing?.bedrooms || null, // Listing Beds
+      ba303d13dded1058170bf910484040e4129db439: listing?.category || null, // Listing Category
+      "5611eb969142e83db4b1e8bee1463a55da8b341c":
+        listing?.furnishingType || null, // Listing Furnished
+      "299efb50006c0b2dd4d88ad4db4e78b34b950238":
+        Object.keys(listing?.products || {})[0] || null, // Listing Product (first key)
+      "406b4db7f3830ff67e2f30b02c76586888defeb3":
+        listing?.qualityScore?.value || null, // Listing Quality Score
+      aea31d4cd4f0db5db2991d08051a52094b53704b: listing?.size || null, // Listing Size
+      "53966df67e491c5ed892a94d250f980ea6a00eeb": listing?.title?.en || null, // Listing Title
+      d30bed5545084db670f2a84815adf7eb120d5773: listing?.type || null, // Listing Property Type
+      eb855d59f7d59f5b352c1ad2e3bb518752382f2d:
+        listing?.verificationStatus || null, // Listing Verified
+    };
+    const deal = await pdPost("/deals", dealPayload);
     if (!deal.success) throw new Error("Deal creation failed");
 
-    // Add note
+    // Add Note (for reference)
     const note = {
       deal_id: deal.data.id,
       content: [
         `**Portal:** Property Finder`,
-        `**Channel:** ${lead?.channel}`,
-        `**Listing Ref:** ${listing?.reference}`,
-        `**Price:** ${listing?.price?.amounts?.yearly || 0} AED`,
+        `**Channel:** ${channel}`,
+        `**Listing Ref:** ${listingRef}`,
+        `**Price:** ${listingPrice} AED`,
         `**Response Link:** ${lead?.responseLink}`,
         "",
         "**Raw JSON:**",
@@ -279,8 +316,9 @@ app.post("/webhook", async (req, res) => {
     await pdPost("/notes", note);
 
     await sendLog("✅ Deal created successfully", {
-      pipedrive_person_id: personId,
-      pipedrive_deal_id: deal.data.id,
+      deal_id: deal.data.id,
+      person_id: personId,
+      pipeline_id: CLIENTS_PIPELINE_ID,
     });
 
     res.status(200).json({
