@@ -336,6 +336,291 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+/* ============================================================
+   🟢 BAYUT WEBHOOK — Call / WhatsApp / Enquiry Leads
+   ============================================================ */
+app.post("/webhook/bayut", async (req, res) => {
+  try {
+    await sendLog("📩 Incoming Bayut webhook", req.body);
+    const lead = req.body;
+
+    // ✅ Validate the payload shape
+    if (!lead) throw new Error("Invalid Bayut payload");
+
+    // Extract base data (Bayut Push API provides different types — call/whatsapp/email)
+    const portal = "Bayut";
+    const sourceType = lead?.lead_type || "call"; // call / whatsapp / email etc.
+    const leadTime = lead?.created_at || new Date().toISOString();
+    const channel = lead?.lead_type || "call";
+
+    // Caller details (buyer/enquirer)
+    const customerName = lead?.enquirer?.name || "Bayut Lead";
+    const customerPhone = normalizePhone(lead?.enquirer?.phone_number);
+    const customerEmail = lead?.enquirer?.email || null;
+
+    // Agent / Listing info
+    const agentName = lead?.agent?.name || "";
+    const agentPhone = normalizePhone(lead?.agent?.phone);
+    const agentEmail = lead?.agent?.email || "";
+    const listingRef = lead?.listing?.reference || "";
+    const listingTitle = lead?.listing?.title || "";
+    const listingPrice = lead?.listing?.price || 0;
+    const listingBeds = lead?.listing?.bedrooms || null;
+    const listingSize = lead?.listing?.size || null;
+    const listingFurnished = lead?.listing?.furnished_status || null;
+    const listingType = lead?.listing?.type || null;
+    const listingVerified = lead?.listing?.verified || null;
+    const listingCategory = lead?.listing?.category || null;
+    const listingUrl = lead?.listing?.url || "";
+
+    // Create / Find person (customer)
+    let personId = await findPerson({
+      email: customerEmail,
+      phone: customerPhone,
+    });
+    if (!personId) {
+      const p = await pdPost("/persons", {
+        name: customerName,
+        ...(customerEmail
+          ? { email: [{ value: customerEmail, primary: true }] }
+          : {}),
+        ...(customerPhone
+          ? { phone: [{ value: customerPhone, primary: true }] }
+          : {}),
+      });
+      if (!p.success) throw new Error("Person create failed");
+      personId = p.data.id;
+    }
+
+    // Create Deal in Clients pipeline (4)
+    const dealTitle = `${customerName} | ${listingTitle} | ${listingRef} (${channel})`;
+    const dealPayload = {
+      title: dealTitle,
+      person_id: personId,
+      value: listingPrice,
+      currency: DEFAULT_CURRENCY,
+      pipeline_id: 4,
+      status: "open",
+      visible_to: "3",
+
+      // ✅ Basic source mapping
+      dd33ab8a28f1855b734beab08987eb86933706fa: channel, // Source Type
+      e0c51e09b74263ff900e7d7a1ca4b00d06e58bcf: listingRef, // Listing Ref
+      cd786e99a8fc60d9d437d9540b5e49f1937ab8ea: listingPrice, // Listing Price
+      "12dbd54260ad300537c002bd423cf48ecc618e8e": leadTime, // Enquiry Date
+      "8db7b87dc9d9147db03b063ee9e678d236879791": customerPhone, // WhatsApp Number
+
+      // ✅ Agent details
+      "2fec03e9ce0f41f43c929cbbb1c628e9ec3db3bc": agentName,
+      "213b8e2bdbc862b02296cc0233af26689beb4e0a": agentPhone,
+      "146ce25cf22cf5635f7cabde8c81214ff2202c2c": agentEmail,
+
+      // ✅ Listing info
+      "50332e118438da736f8b85d589d24448da38bd5e": listingBeds,
+      aea31d4cd4f0db5db2991d08051a52094b53704b: listingSize,
+      "5611eb969142e83db4b1e8bee1463a55da8b341c": listingFurnished,
+      d30bed5545084db670f2a84815adf7eb120d5773: listingType,
+      eb855d59f7d59f5b352c1ad2e3bb518752382f2d: listingVerified,
+      ba303d13dded1058170bf910484040e4129db439: listingCategory,
+      "53966df67e491c5ed892a94d250f980ea6a00eeb": listingTitle,
+    };
+
+    const deal = await pdPost("/deals", dealPayload);
+    if (!deal.success) throw new Error("Deal creation failed");
+
+    // Add Note
+    const note = {
+      deal_id: deal.data.id,
+      content: [
+        `**Portal:** ${portal}`,
+        `**Lead Type:** ${sourceType}`,
+        `**Agent:** ${agentName}`,
+        `**Agent Email:** ${agentEmail}`,
+        `**Agent Phone:** ${agentPhone}`,
+        `**Customer:** ${customerName}`,
+        `**Customer Phone:** ${customerPhone}`,
+        `**Listing Ref:** ${listingRef}`,
+        `**Listing URL:** ${listingUrl}`,
+        "",
+        "**Raw JSON:**",
+        "```json",
+        JSON.stringify(lead, null, 2),
+        "```",
+      ].join("\n"),
+    };
+    await pdPost("/notes", note);
+
+    await sendLog("✅ Bayut lead processed successfully", {
+      deal_id: deal.data.id,
+      person_id: personId,
+    });
+
+    res.status(200).json({ success: true, deal_id: deal.data.id });
+  } catch (err) {
+    console.error("❌ Bayut webhook error:", err);
+    await sendLog("❌ Error in Bayut webhook", {
+      error: err.message,
+      stack: err.stack,
+    });
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- Place near top of file ---
+import crypto from "crypto";
+
+// If you don't already capture raw body globally, add a route-level raw parser:
+app.post(
+  "/webhook/dubizzle",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      // 1) Verify signature
+      const secret = process.env.DUBIZZLE_SECRET || "";
+      const rawBody = req.body?.toString("utf8") || "";
+      const receivedSig = (
+        req.get("X-dubizzle-Signature") ||
+        req.get("x-dubizzle-signature") ||
+        ""
+      ).trim();
+      const expectedSig = crypto
+        .createHash("md5")
+        .update(secret + rawBody)
+        .digest("hex");
+
+      if (!secret || !receivedSig || receivedSig !== expectedSig) {
+        await sendLog("❌ Dubizzle signature verification failed", {
+          receivedSig,
+          expectedSig,
+          hasSecret: !!secret,
+        });
+        return res
+          .status(401)
+          .json({ success: false, error: "Invalid signature" });
+      }
+
+      // 2) Parse payload
+      let lead;
+      try {
+        lead = JSON.parse(rawBody);
+      } catch {
+        await sendLog("❌ Dubizzle invalid JSON");
+        return res.status(400).json({ success: false, error: "Invalid JSON" });
+      }
+
+      await sendLog("📩 Incoming Dubizzle webhook (verified)", lead);
+
+      // 3) Extract data (per Dubizzle Push API WhatsApp payload)
+      const portal = "Dubizzle";
+      const channel = "whatsapp"; // per Push payload type
+      const enquiryDate = lead?.received_at || new Date().toISOString();
+
+      const customerName = lead?.enquirer?.name || "Dubizzle Lead";
+      const customerPhone = normalizePhone(lead?.enquirer?.phone_number);
+      const responseUrl = lead?.enquirer?.contact_link || ""; // chat contact link
+
+      const listingRef = lead?.listing?.reference || "";
+      const listingUrl = lead?.listing?.url || "";
+      const listingTitle = ""; // Dubizzle Push payload does not include a title
+      const listingPrice = 0; // Not present in Push payload
+
+      // 4) Create / update Person (customer)
+      let personId = await findPerson({ phone: customerPhone });
+      if (!personId) {
+        const p = await pdPost("/persons", {
+          name: customerName,
+          ...(customerPhone
+            ? { phone: [{ value: customerPhone, primary: true }] }
+            : {}),
+        });
+        if (!p?.success)
+          throw new Error(`Person create failed: ${JSON.stringify(p)}`);
+        personId = p.data.id;
+      } else {
+        // Optional: update basic details
+        await pdPut(`/persons/${personId}`, {
+          name: customerName,
+          ...(customerPhone
+            ? { phone: [{ value: customerPhone, primary: true }] }
+            : {}),
+        });
+      }
+
+      // 5) Create Deal in Clients pipeline (id=4) with your custom mappings
+      const dealTitle = `${customerName}${
+        listingTitle ? " | " + listingTitle : ""
+      }${listingRef ? " | " + listingRef : ""} (${channel})`;
+
+      const dealPayload = {
+        title: dealTitle,
+        person_id: personId,
+        value: listingPrice,
+        currency: DEFAULT_CURRENCY,
+        pipeline_id: 4,
+        status: "open",
+        visible_to: "3",
+
+        // --- Your existing custom fields ---
+        // Source Type (Op)
+        dd33ab8a28f1855b734beab08987eb86933706fa: channel,
+        // Listing Ref (Op)
+        e0c51e09b74263ff900e7d7a1ca4b00d06e58bcf: listingRef,
+        // Listing Price (Op) -> 0 (not provided by Dubizzle Push)
+        cd786e99a8fc60d9d437d9540b5e49f1937ab8ea: listingPrice,
+        // Response URL (Op) -> use contact link if present; else listing URL
+        "167d14dc0b5099bed92a67e682d7ddcbc14fd878":
+          responseUrl || listingUrl || null,
+        // Enquiry Date (Op)
+        "12dbd54260ad300537c002bd423cf48ecc618e8e": enquiryDate,
+        // WhatsApp Number (Deal)
+        "8db7b87dc9d9147db03b063ee9e678d236879791": customerPhone || null,
+
+        // Fields you mapped for PF/Bayut which aren't present in Dubizzle Push payload
+        // will simply be omitted or left null here (agent details, title, etc.)
+        "53966df67e491c5ed892a94d250f980ea6a00eeb": listingTitle || null, // Listing Title (if you later enrich)
+      };
+
+      const deal = await pdPost("/deals", dealPayload);
+      if (!deal?.success)
+        throw new Error(`Deal creation failed: ${JSON.stringify(deal)}`);
+
+      // 6) Add a note with raw JSON for audit
+      const note = {
+        deal_id: deal.data.id,
+        content: [
+          `**Portal:** ${portal}`,
+          `**Channel:** ${channel}`,
+          `**Listing Ref:** ${listingRef}`,
+          `**Listing URL:** ${listingUrl}`,
+          `**Contact Link:** ${responseUrl}`,
+          "",
+          "**Raw JSON:**",
+          "```json",
+          JSON.stringify(lead, null, 2),
+          "```",
+        ].join("\n"),
+      };
+      await pdPost("/notes", note);
+
+      await sendLog("✅ Dubizzle lead → Deal created", {
+        deal_id: deal.data.id,
+        person_id: personId,
+      });
+
+      res
+        .status(200)
+        .json({ success: true, deal_id: deal.data.id, person_id: personId });
+    } catch (err) {
+      console.error("❌ Dubizzle webhook error:", err);
+      await sendLog("❌ Error in Dubizzle webhook", {
+        error: err.message,
+        stack: err.stack,
+      });
+      res.status(500).json({ success: false, error: err.message });
+    }
+  }
+);
+
 /* -------------------- START -------------------- */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
