@@ -34,6 +34,8 @@ const CF_ENQUIRY_DATE = "12dbd54260ad300537c002bd423cf48ecc618e8e"; // Enquiry D
 const CF_WHATSAPP_NUMBER = "8db7b87dc9d9147db03b063ee9e678d236879791"; // WhatsApp Number
 const CF_LISTING_AGENT = "2fec03e9ce0f41f43c929cbbb1c628e9ec3db3bc"; // Listing Agent
 const CF_AGENT_PHONE = "213b8e2bdbc862b02296cc0233af26689beb4e0a"; // Agent Phone
+// Property Finder Event ID custom field (ProperyFinderId)
+const CF_PF_EVENT_ID = "370ec98b9730defabd9813bd08bbf0c841f7c54c";
 
 /* -------------------- ATLAS TOKEN CACHE -------------------- */
 let atlasToken = null;
@@ -155,6 +157,17 @@ async function findPerson({ email, phone }) {
   return null;
 }
 
+// Find existing deal by PF event id stored in custom fields
+async function findDealByEventId(eventId) {
+  if (!eventId) return null;
+  const q = `/deals/search?term=${encodeURIComponent(
+    eventId
+  )}&fields=custom_fields&exact_match=true`;
+  const j = await pdGet(q);
+  const item = j?.data?.items?.[0]?.item;
+  return item || null;
+}
+
 /* -------------------- MAIN HANDLER -------------------- */
 app.post("/webhook", async (req, res) => {
   try {
@@ -163,6 +176,23 @@ app.post("/webhook", async (req, res) => {
     const evt = req.body;
     if (!evt?.payload) throw new Error("Missing payload in event");
     const lead = evt.payload;
+
+    // Idempotency: check by PF event id (e.g., lead-created-XXXX)
+    const eventId = req.body?.id || null;
+    if (eventId) {
+      const existing = await findDealByEventId(eventId);
+      if (existing?.id) {
+        await sendLog("ℹ️ PF duplicate detected via eventId; skipping deal", {
+          eventId,
+          deal_id: existing.id,
+        });
+        return res.status(200).json({
+          success: true,
+          deduped: true,
+          pipedrive_deal_id: existing.id,
+        });
+      }
+    }
 
     // Extract sender (customer)
     const senderName = lead?.sender?.name || "Property Finder Lead";
@@ -274,6 +304,9 @@ app.post("/webhook", async (req, res) => {
       [CF_WHATSAPP_NUMBER]: senderPhone || null, // WhatsApp Number
       [CF_LISTING_AGENT]: agentName || null, // Listing Agent
       [CF_AGENT_PHONE]: agentPhone || null, // Agent Phone
+
+      // Persist PF event id if a field key is configured
+      ...(CF_PF_EVENT_ID && eventId ? { [CF_PF_EVENT_ID]: eventId } : {}),
 
       // === Additional Property / Agent info ===
       "146ce25cf22cf5635f7cabde8c81214ff2202c2c":
