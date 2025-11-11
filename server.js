@@ -26,25 +26,31 @@ const ATLAS_BASE = "https://atlas.propertyfinder.com/v1";
 const CLIENTS_PIPELINE_ID = 4;
 
 /* ---------- PIPEDRIVE CUSTOM FIELDS (DEAL) ---------- */
-const CF_SOURCE_TYPE = "dd33ab8a28f1855b734beab08987eb86933706fa"; // Channel
-const CF_LISTING_REF = "e0c51e09b74263ff900e7d7a1ca4b00d06e58bcf"; // Listing Ref
-const CF_LISTING_PRICE = "cd786e99a8fc60d9d437d9540b5e49f1937ab8ea"; // Listing Price
-const CF_RESPONSE_URL = "167d14dc0b5099bed92a67e682d7ddcbc14fd878"; // Response URL
-const CF_ENQUIRY_DATE = "12dbd54260ad300537c002bd423cf48ecc618e8e"; // Enquiry Date
-const CF_WHATSAPP_NUMBER = "8db7b87dc9d9147db03b063ee9e678d236879791"; // WhatsApp Number
-const CF_LISTING_AGENT = "2fec03e9ce0f41f43c929cbbb1c628e9ec3db3bc"; // Listing Agent
-const CF_AGENT_PHONE = "213b8e2bdbc862b02296cc0233af26689beb4e0a"; // Agent Phone
-// Property Finder Event ID custom field (ProperyFinderId)
-const CF_PF_EVENT_ID = "370ec98b9730defabd9813bd08bbf0c841f7c54c";
+const CF_SOURCE_TYPE = "dd33ab8a28f1855b734beab08987eb86933706fa"; // Source Type (Op)
+const CF_LISTING_REF = "e0c51e09b74263ff900e7d7a1ca4b00d06e58bcf"; // Listing Ref (Op)
+const CF_LISTING_PRICE = "cd786e99a8fc60d9d437d9540b5e49f1937ab8ea"; // Listing Price (Op)
+const CF_RESPONSE_URL = "167d14dc0b5099bed92a67e682d7ddcbc14fd878"; // Response URL (Op)
+const CF_ENQUIRY_DATE = "12dbd54260ad300537c002bd423cf48ecc618e8e"; // Enquiry Date (Op) (date)
+const CF_WHATSAPP_NUMBER = "8db7b87dc9d9147db03b063ee9e678d236879791"; // WhatsApp Number (Deal)
+const CF_LISTING_AGENT = "2fec03e9ce0f41f43c929cbbb1c628e9ec3db3bc"; // Listing Agent (Op)
+const CF_AGENT_PHONE = "213b8e2bdbc862b02296cc0233af26689beb4e0a"; // Agent Phone (Op)
+const CF_PF_EVENT_ID = "370ec98b9730defabd9813bd08bbf0c841f7c54c"; // PropertyFinderId
 
-// NEW (you already added earlier, just re-confirm the key):
-const CF_VERIF_STATUS_RAW = "199e75918408d6c723499560af0dcc54723b67fd"; // Listing Verification Status New (Op)
+// NEW (confirmed):
+const CF_VERIF_STATUS_RAW = "199e75918408d6c723499560af0dcc54723b67fd"; // Listing Verification Status New (Op) - varchar
 
-// Pipedrive built-in enum field for Source channel
-const PD_FIELD_SOURCE_CHANNEL = "channel"; // enum; use option ID 257 ("Property Finder")
+// Built-in enum field (Source channel) → set to "Property Finder"
+const PD_FIELD_SOURCE_CHANNEL = "channel"; // enum
 
-// Your existing "Listing Verified (Op)" enum
-const CF_LISTING_VERIFIED = "eb855d59f7d59f5b352c1ad2e3bb518752382f2d"; // options: 651 Verified, 652 Approved
+// Enum fields:
+const CF_LISTING_VERIFIED = "eb855d59f7d59f5b352c1ad2e3bb518752382f2d"; // Listing Verified (Op)
+const CF_LISTING_CATEGORY = "ba303d13dded1058170bf910484040e4129db439"; // Listing Category (Op)
+const CF_LISTING_PRODUCT = "299efb50006c0b2dd4d88ad4db4e78b34b950238"; // Listing Product (Op)
+const CF_LISTING_FURNISHED = "5611eb969142e83db4b1e8bee1463a55da8b341c"; // Listing Furnished (Op)
+const CF_PROPERTY_TYPE = "d30bed5545084db670f2a84815adf7eb120d5773"; // Listing Property Type (Op)
+
+// ➕ Beds field key (treat as enum)
+const CF_LISTING_BEDS = "50332e118438da736f8b85d589d24448da38bd5e"; // Listing Beds (Op)
 
 /* -------------------- ATLAS TOKEN CACHE -------------------- */
 let atlasToken = null;
@@ -87,12 +93,16 @@ async function atlasGet(path) {
 function normalizePhone(str) {
   return str ? str.toString().replace(/[^\d+]/g, "") : null;
 }
-function buildDealTitle({ name, listingRef, listingTitle, channel }) {
-  const who = name || "PF Lead";
-  const ref = listingRef ? ` | ${listingRef}` : "";
-  const ttl = listingTitle ? ` | ${listingTitle}` : "";
-  const ch = channel ? ` (${channel})` : "";
-  return `${who}${ttl}${ref}${ch}`;
+function buildDealTitlePF({ name, phone, sourceType }) {
+  const who = name || "Property Finder Lead";
+  const ph = phone ? ` - ${phone}` : "";
+  const st = sourceType || "";
+  return `${who}${ph} | ${st} Property Finder Lead`;
+}
+function pickListingPrice(listing) {
+  const amounts = listing?.price?.amounts || {};
+  const n = Number(amounts.yearly ?? amounts.monthly ?? 0);
+  return Number.isFinite(n) ? n : 0;
 }
 
 /* -------------------- LOGGING TO ZOHO -------------------- */
@@ -165,8 +175,6 @@ async function findPerson({ email, phone }) {
   }
   return null;
 }
-
-// Find existing deal by PF event id stored in custom fields
 async function findDealByEventId(eventId) {
   if (!eventId) return null;
   const q = `/deals/search?term=${encodeURIComponent(
@@ -186,68 +194,103 @@ function mapSourceType(channel) {
     (channel ? channel.charAt(0).toUpperCase() + channel.slice(1) : "")
   );
 }
-
-// Pipedrive expects enum option IDs. Map PF verificationStatus → your enum IDs.
 function mapVerificationToId(status) {
   const v = (status || "").toLowerCase();
   if (v === "verified") return 651;
   if (v === "approved") return 652;
-  return null; // unknown → leave null
+  return null;
 }
-function mapCategory(cat) {
+function normCategory(cat) {
   const v = (cat || "").toLowerCase();
-  const map = { residential: "Residential", commercial: "Commercial" };
-  return map[v] || null;
+  if (v === "residential") return "Residential";
+  if (v === "commercial") return "Commercial";
+  return null;
 }
-function mapProduct(listing) {
-  // listing.products could have keys: standard, featured, premium, spotlight
-  const key =
-    listing && listing.products ? Object.keys(listing.products)[0] : null;
-  if (!key) return null;
-  const map = {
-    standard: "Standard",
-    featured: "Featured",
-    premium: "Premium",
-    spotlight: "Spotlight",
-  };
-  return map[key] || null;
-}
-function mapFurnishing(f) {
+function normFurnishing(f) {
   const v = (f || "").toLowerCase();
-  const map = { furnished: "Furnished", unfurnished: "Unfurnished" };
-  return map[v] || null;
+  if (v === "furnished") return "Furnished";
+  if (v === "unfurnished") return "Unfurnished";
+  return null;
 }
-function mapPropertyType(t) {
+function normPropertyType(t) {
   const v = (t || "").toLowerCase();
-  const map = {
+  const table = {
     apartment: "Apartment",
     villa: "Villa",
     townhouse: "Townhouse",
     duplex: "Duplex",
     penthouse: "Penthouse",
   };
-  return map[v] || null;
+  return table[v] || null;
 }
-function mapVerified(s) {
-  const v = (s || "").toLowerCase();
-  // your field uses an enum; typically "Approved" or "Verified"
-  if (v === "approved") return "Approved";
-  if (v === "verified") return "Verified";
-  return null;
-}
-// Title: Name - Phone | <SourceType> Property Finder Lead
-function buildDealTitlePF({ name, phone, sourceType }) {
-  const who = name || "Property Finder Lead";
-  const ph = phone ? ` - ${phone}` : "";
-  const st = sourceType || "";
-  return `${who}${ph} | ${st} Property Finder Lead`;
+function normProductFromListing(listing) {
+  const key =
+    listing && listing.products ? Object.keys(listing.products)[0] : null;
+  if (!key) return null;
+  const table = {
+    standard: "Standard",
+    featured: "Featured",
+    premium: "Premium",
+    spotlight: "Spotlight",
+  };
+  return table[String(key).toLowerCase()] || null;
 }
 
-// Prefer yearly → monthly → 0
-function pickListingPrice(listing) {
-  const amounts = listing?.price?.amounts || {};
-  const n = Number(amounts.yearly ?? amounts.monthly ?? 0);
-  return Number.isFinite(n) ? n : 0;
+// Beds → enum label: 0 => "Studio", N => "N"
+function normBedsLabel(bedrooms) {
+  if (bedrooms == null) return null;
+  const n = Number(bedrooms);
+  if (!Number.isFinite(n)) return null;
+  return n === 0 ? "Studio" : String(n);
+}
+
+function bedsText(bedrooms) {
+  if (bedrooms === undefined || bedrooms === null) return null;
+  return String(bedrooms);
+}
+
+/* ---------- Deal field options cache (label → id) ---------- */
+const dealFieldOptionsCache = new Map(); // fieldKey -> { labelLower: optionId }
+let fieldOptionsReady = false;
+
+async function loadDealFieldOptions() {
+  const url = `${PD_DOMAIN}/dealFields?api_token=${PD_TOKEN}`;
+  const r = await fetch(url);
+  const j = await r.json();
+  if (!j?.data) return;
+
+  const keysWeCare = new Set([
+    PD_FIELD_SOURCE_CHANNEL,
+    CF_LISTING_VERIFIED,
+    CF_LISTING_CATEGORY,
+    CF_LISTING_PRODUCT,
+    CF_LISTING_FURNISHED,
+    CF_PROPERTY_TYPE,
+    CF_LISTING_BEDS, // 👈 include BEDS in the cache
+  ]);
+
+  for (const f of j.data) {
+    if (keysWeCare.has(f.key) && Array.isArray(f.options)) {
+      const map = {};
+      for (const opt of f.options) {
+        if (!opt?.id || !opt?.label) continue;
+        map[String(opt.label).toLowerCase()] = opt.id;
+      }
+      dealFieldOptionsCache.set(f.key, map);
+    }
+  }
+}
+async function ensureFieldOptions() {
+  if (!fieldOptionsReady) {
+    await loadDealFieldOptions();
+    fieldOptionsReady = true;
+  }
+}
+function getEnumId(fieldKey, label) {
+  if (!label) return null;
+  const opts = dealFieldOptionsCache.get(fieldKey);
+  if (!opts) return null;
+  return opts[String(label).toLowerCase()] ?? null;
 }
 
 /* -------------------- MAIN HANDLER -------------------- */
@@ -259,7 +302,6 @@ app.post("/webhook", async (req, res) => {
     if (!evt?.payload) throw new Error("Missing payload in event");
     const lead = evt.payload;
 
-    // Idempotency: check by PF event id (e.g., lead-created-XXXX)
     const eventId = req.body?.id || null;
     if (eventId) {
       const existing = await findDealByEventId(eventId);
@@ -301,7 +343,7 @@ app.post("/webhook", async (req, res) => {
       user = userRes?.json?.data?.[0] || null;
     }
 
-    // Fetch listing details (for title, price, etc.)
+    // Fetch listing details
     let listing = null;
     if (listingId) {
       const listRes = await atlasGet(
@@ -310,19 +352,20 @@ app.post("/webhook", async (req, res) => {
       listing = listRes?.json?.results?.[0] || null;
     }
 
+    // Ensure enum option cache is loaded
+    await ensureFieldOptions();
+
     // ---- compute values first ----
     const listingRef = listing?.reference || lead?.listing?.reference || "";
     const listingTitle = listing?.title?.en || "";
     const listingPrice = pickListingPrice(listing);
     const channel = lead?.channel || "";
-    const sourceType = mapSourceType(channel);
+    const sourceTypeLabel = mapSourceType(channel);
 
-    // Enquiry date must be YYYY-MM-DD for Pipedrive "date" fields
-    const enquiryDate = lead?.createdAt
-      ? dayjs(lead.createdAt).format("YYYY-MM-DD")
-      : null;
+    // ⏱ Enquiry date → always today (YYYY-MM-DD)
+    const enquiryDate = dayjs().format("YYYY-MM-DD");
 
-    // Agent values you already compute:
+    // Agent
     const agentName =
       [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim() ||
       user?.publicProfile?.name ||
@@ -334,19 +377,52 @@ app.post("/webhook", async (req, res) => {
         null
     );
 
-    // Verification: enum ID + raw string
-    const verStatusRaw = listing?.verificationStatus || null; // e.g., "approved"
-    const verStatusId = mapVerificationToId(verStatusRaw); // 651/652/null
+    // Verification
+    const verStatusRaw = listing?.verificationStatus || null;
+    const verStatusId =
+      getEnumId(CF_LISTING_VERIFIED, verStatusRaw) ??
+      mapVerificationToId(verStatusRaw);
 
-    // await sendLog("🧾 Extracted lead info", {
-    //   senderName,
-    //   senderPhone,
-    //   channel,
-    //   listingRef,
-    //   listingPrice,
-    //   agentName,
-    //   agentPhone,
-    // });
+    // Other enums (map label → id)
+    const catId = getEnumId(
+      CF_LISTING_CATEGORY,
+      normCategory(listing?.category)
+    );
+    const furnId = getEnumId(
+      CF_LISTING_FURNISHED,
+      normFurnishing(listing?.furnishingType)
+    );
+    const prodId = getEnumId(
+      CF_LISTING_PRODUCT,
+      normProductFromListing(listing)
+    );
+    const typeId = getEnumId(CF_PROPERTY_TYPE, normPropertyType(listing?.type));
+
+    // Beds enum
+    const bedsLabel = normBedsLabel(listing?.bedrooms);
+    const bedsId = getEnumId(CF_LISTING_BEDS, bedsLabel);
+
+    // Source channel enum → “Property Finder”
+    const sourceChannelId =
+      getEnumId(PD_FIELD_SOURCE_CHANNEL, "Property Finder") || 257;
+
+    await sendLog("? Deal payload (key fields)", {
+      title: buildDealTitlePF({
+        name: senderName,
+        phone: senderPhone,
+        sourceType: sourceTypeLabel,
+      }),
+      enquiryDate,
+      sourceChannelId,
+      listingVerifiedId: verStatusId,
+      verStatusRaw,
+      catId,
+      furnId,
+      prodId,
+      typeId,
+      bedsId,
+      bedsLabel,
+    });
 
     // Create/update Person
     let personId = await findPerson({ email: senderEmail, phone: senderPhone });
@@ -375,60 +451,59 @@ app.post("/webhook", async (req, res) => {
     }
 
     // Create Deal in Clients pipeline (4) with mapped fields
-    // ---- build payload (all custom keys are quoted) ----
     const dealPayload = {
       title: buildDealTitlePF({
         name: senderName,
         phone: senderPhone,
-        sourceType,
+        sourceType: sourceTypeLabel,
       }),
       person_id: personId,
       value: listingPrice,
       currency: DEFAULT_CURRENCY,
-      pipeline_id: CLIENTS_PIPELINE_ID, // 4
+      pipeline_id: CLIENTS_PIPELINE_ID,
       status: "open",
       visible_to: "3",
 
       // --- Required PF → PD mappings ---
-      [CF_ENQUIRY_DATE]: enquiryDate, // Enquiry Date (Op) — lead created date
-      [CF_LISTING_VERIFIED]: verStatusId, // Listing Verified (Op) — enum option id
-      [CF_VERIF_STATUS_RAW]: verStatusRaw, // Listing Verification Status New (Op) — raw string
-      [PD_FIELD_SOURCE_CHANNEL]: 257, // Source channel = "Property Finder" (option id)
+      [CF_ENQUIRY_DATE]: enquiryDate, // today
+      [CF_LISTING_VERIFIED]: verStatusId, // enum id
+      [CF_VERIF_STATUS_RAW]: verStatusRaw, // raw string
+      [PD_FIELD_SOURCE_CHANNEL]: sourceChannelId, // Property Finder
 
-      // Existing fields you already used (kept, but with safer values)
-      [CF_SOURCE_TYPE]: sourceType, // Source Type (Op) — enum label you display
-      [CF_LISTING_REF]: listingRef || null, // Listing Ref
-      [CF_LISTING_PRICE]: listingPrice || 0, // Listing Price (amount)
-      [CF_RESPONSE_URL]: lead?.responseLink || null, // Response URL
-      [CF_WHATSAPP_NUMBER]: senderPhone || null, // WhatsApp Number (deal)
-      [CF_LISTING_AGENT]: agentName || null, // Listing Agent
-      [CF_AGENT_PHONE]: agentPhone || null, // Agent Phone
+      // Existing fields
+      [CF_SOURCE_TYPE]: sourceTypeLabel || null,
+      [CF_LISTING_REF]: listingRef || null,
+      [CF_LISTING_PRICE]: listingPrice || 0,
+      [CF_RESPONSE_URL]: lead?.responseLink || null,
+      [CF_WHATSAPP_NUMBER]: senderPhone || null,
+      [CF_LISTING_AGENT]: agentName || null,
+      [CF_AGENT_PHONE]: agentPhone || null,
 
-      // Persist PF event id if you wish
+      // Persist PF event id (optional)
       ...(CF_PF_EVENT_ID && eventId ? { [CF_PF_EVENT_ID]: eventId } : {}),
 
-      // --- Optional extra listing/agent fields (leave as you had) ---
+      // --- Additional enums via IDs ---
+      [CF_LISTING_CATEGORY]: catId ?? null,
+      [CF_LISTING_FURNISHED]: furnId ?? null,
+      [CF_LISTING_PRODUCT]: prodId ?? null,
+      [CF_PROPERTY_TYPE]: typeId ?? null,
+      [CF_LISTING_BEDS]: bedsText(listing?.bedrooms) ?? null, // 👈 Beds now set as enum ID
+
+      // --- Optional descriptive fields ---
       "146ce25cf22cf5635f7cabde8c81214ff2202c2c":
         user?.email || user?.publicProfile?.email || null, // Agent Email
       cb6454716c95c7f906666d170b46483631a770b0:
         user?.id || user?.publicProfile?.id || null, // Agent Portal ID
-      "50332e118438da736f8b85d589d24448da38bd5e":
-        listing?.bedrooms != null ? String(listing.bedrooms) : null,
-      ba303d13dded1058170bf910484040e4129db439: listing?.category || null, // (if you want enum ID mapping, we can map)
-      "5611eb969142e83db4b1e8bee1463a55da8b341c":
-        listing?.furnishingType || null, // (enum—map if options enforced)
-      "299efb50006c0b2dd4d88ad4db4e78b34b950238":
-        Object.keys(listing?.products || {})[0] || null, // (enum—map if options enforced)
       "406b4db7f3830ff67e2f30b02c76586888defeb3":
         listing?.qualityScore?.value ?? null,
       aea31d4cd4f0db5db2991d08051a52094b53704b: listing?.size ?? null,
       "53966df67e491c5ed892a94d250f980ea6a00eeb": listingTitle || null,
-      d30bed5545084db670f2a84815adf7eb120d5773: listing?.type || null,
     };
+
     const deal = await pdPost("/deals", dealPayload);
     if (!deal.success) throw new Error("Deal creation failed");
 
-    // Add Note (for reference)
+    // Add Note
     const note = {
       deal_id: deal.data.id,
       content: [
