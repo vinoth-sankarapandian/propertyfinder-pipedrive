@@ -168,6 +168,63 @@ async function findDealByEventId(eventId) {
   return item || null;
 }
 
+/* ---------- ENUM & VALUE HELPERS ---------- */
+function mapSourceType(channel) {
+  const v = (channel || "").toLowerCase();
+  const map = { whatsapp: "WhatsApp", call: "Call", email: "Email" };
+  return (
+    map[v] ||
+    (channel ? channel.charAt(0).toUpperCase() + channel.slice(1) : null)
+  );
+}
+function mapCategory(cat) {
+  const v = (cat || "").toLowerCase();
+  const map = { residential: "Residential", commercial: "Commercial" };
+  return map[v] || null;
+}
+function mapProduct(listing) {
+  // listing.products could have keys: standard, featured, premium, spotlight
+  const key =
+    listing && listing.products ? Object.keys(listing.products)[0] : null;
+  if (!key) return null;
+  const map = {
+    standard: "Standard",
+    featured: "Featured",
+    premium: "Premium",
+    spotlight: "Spotlight",
+  };
+  return map[key] || null;
+}
+function mapFurnishing(f) {
+  const v = (f || "").toLowerCase();
+  const map = { furnished: "Furnished", unfurnished: "Unfurnished" };
+  return map[v] || null;
+}
+function mapPropertyType(t) {
+  const v = (t || "").toLowerCase();
+  const map = {
+    apartment: "Apartment",
+    villa: "Villa",
+    townhouse: "Townhouse",
+    duplex: "Duplex",
+    penthouse: "Penthouse",
+  };
+  return map[v] || null;
+}
+function mapVerified(s) {
+  const v = (s || "").toLowerCase();
+  // your field uses an enum; typically "Approved" or "Verified"
+  if (v === "approved") return "Approved";
+  if (v === "verified") return "Verified";
+  return null;
+}
+function pickListingPrice(listing) {
+  // Prefer 'yearly' if present (rent); otherwise try monthly; otherwise 0
+  const amounts = listing?.price?.amounts || {};
+  const n = Number(amounts.yearly ?? amounts.monthly ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
 /* -------------------- MAIN HANDLER -------------------- */
 app.post("/webhook", async (req, res) => {
   try {
@@ -228,9 +285,10 @@ app.post("/webhook", async (req, res) => {
       listing = listRes?.json?.results?.[0] || null;
     }
 
+    // ---- compute values first ----
     const listingRef = listing?.reference || lead?.listing?.reference || "";
     const listingTitle = listing?.title?.en || "";
-    const listingPrice = Number(listing?.price?.amounts?.yearly || 0);
+    const listingPrice = pickListingPrice(listing);
     const channel = lead?.channel || "";
 
     const agentName =
@@ -281,6 +339,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     // Create Deal in Clients pipeline (4) with mapped fields
+    // ---- build payload (all custom keys are quoted) ----
     const dealPayload = {
       title: buildDealTitle({
         name: senderName,
@@ -291,17 +350,19 @@ app.post("/webhook", async (req, res) => {
       person_id: personId,
       value: listingPrice,
       currency: DEFAULT_CURRENCY,
-      pipeline_id: CLIENTS_PIPELINE_ID,
+      pipeline_id: CLIENTS_PIPELINE_ID, // 4
       status: "open",
       visible_to: "3",
 
-      // === Primary PF → Pipedrive field mappings ===
-      [CF_SOURCE_TYPE]: channel || null, // Source Type
+      // === PF → Pipedrive field mappings ===
+      [CF_SOURCE_TYPE]: mapSourceType(channel), // Source Type (enum)
       [CF_LISTING_REF]: listing?.reference || null, // Listing Ref
-      [CF_LISTING_PRICE]: listingPrice || 0, // Listing Price
+      [CF_LISTING_PRICE]: listingPrice || 0, // Listing Price (monetary amount)
       [CF_RESPONSE_URL]: lead?.responseLink || null, // Response URL
-      [CF_ENQUIRY_DATE]: lead?.createdAt || null, // Enquiry Date
-      [CF_WHATSAPP_NUMBER]: senderPhone || null, // WhatsApp Number
+      [CF_ENQUIRY_DATE]: lead?.createdAt
+        ? dayjs(lead.createdAt).format("YYYY-MM-DD")
+        : null, // Enquiry Date (date)
+      [CF_WHATSAPP_NUMBER]: senderPhone || null, // WhatsApp Number (deal)
       [CF_LISTING_AGENT]: agentName || null, // Listing Agent
       [CF_AGENT_PHONE]: agentPhone || null, // Agent Phone
 
@@ -313,19 +374,22 @@ app.post("/webhook", async (req, res) => {
         user?.email || user?.publicProfile?.email || null, // Agent Email
       cb6454716c95c7f906666d170b46483631a770b0:
         user?.id || user?.publicProfile?.id || null, // Agent Portal ID
-      "50332e118438da736f8b85d589d24448da38bd5e": listing?.bedrooms || null, // Listing Beds
-      ba303d13dded1058170bf910484040e4129db439: listing?.category || null, // Listing Category
-      "5611eb969142e83db4b1e8bee1463a55da8b341c":
-        listing?.furnishingType || null, // Listing Furnished
-      "299efb50006c0b2dd4d88ad4db4e78b34b950238":
-        Object.keys(listing?.products || {})[0] || null, // Listing Product (first key)
+
+      "50332e118438da736f8b85d589d24448da38bd5e":
+        listing?.bedrooms != null ? String(listing.bedrooms) : null, // Listing Beds (varchar)
+      ba303d13dded1058170bf910484040e4129db439: mapCategory(listing?.category), // Listing Category (enum)
+      "5611eb969142e83db4b1e8bee1463a55da8b341c": mapFurnishing(
+        listing?.furnishingType
+      ), // Listing Furnished (enum)
+      "299efb50006c0b2dd4d88ad4db4e78b34b950238": mapProduct(listing), // Listing Product (enum)
       "406b4db7f3830ff67e2f30b02c76586888defeb3":
-        listing?.qualityScore?.value || null, // Listing Quality Score
-      aea31d4cd4f0db5db2991d08051a52094b53704b: listing?.size || null, // Listing Size
+        listing?.qualityScore?.value ?? null, // Listing Quality Score (number)
+      aea31d4cd4f0db5db2991d08051a52094b53704b: listing?.size ?? null, // Listing Size (number)
       "53966df67e491c5ed892a94d250f980ea6a00eeb": listing?.title?.en || null, // Listing Title
-      d30bed5545084db670f2a84815adf7eb120d5773: listing?.type || null, // Listing Property Type
-      eb855d59f7d59f5b352c1ad2e3bb518752382f2d:
-        listing?.verificationStatus || null, // Listing Verified
+      d30bed5545084db670f2a84815adf7eb120d5773: mapPropertyType(listing?.type), // Listing Property Type (enum)
+      eb855d59f7d59f5b352c1ad2e3bb518752382f2d: mapVerified(
+        listing?.verificationStatus
+      ), // Listing Verified (enum)
     };
     const deal = await pdPost("/deals", dealPayload);
     if (!deal.success) throw new Error("Deal creation failed");
