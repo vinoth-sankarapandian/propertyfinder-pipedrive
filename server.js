@@ -97,7 +97,7 @@ function buildDealTitlePF({ name, phone, sourceType }) {
   const who = name || "Property Finder Lead";
   const ph = phone ? ` - ${phone}` : "";
   const st = sourceType || "";
-  return `${who}${ph} | ${st} Property Finder Lead`;
+  return `${who}${ph} | Property Finder ${st} Lead`;
 }
 function pickListingPrice(listing) {
   const amounts = listing?.price?.amounts || {};
