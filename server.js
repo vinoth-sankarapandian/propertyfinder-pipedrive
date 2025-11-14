@@ -681,9 +681,15 @@ app.post(
   express.raw({ type: "application/json" }),
   async (req, res) => {
     try {
+      // ✅ First step: Send log notification (before validation)
+      const rawBody = req.body?.toString("utf8") || "";
+      await sendLog(
+        "🔔 Dubizzle webhook call received - processing started",
+        rawBody ? JSON.parse(rawBody) : null
+      );
+
       // 1) Verify signature
       const secret = process.env.DUBIZZLE_SECRET || "";
-      const rawBody = req.body?.toString("utf8") || "";
       const receivedSig = (
         req.get("X-dubizzle-Signature") ||
         req.get("x-dubizzle-signature") ||
